@@ -1,0 +1,582 @@
+#################################################
+## PREDICT 498
+## Capstone Project - Kaggle Expedia Competition
+## File that preps a data set for the model
+## Collaborative Coding from Brad Lohmeyer, Chanah Stern, Dae Yoon, and Rachel Levy
+#################################################
+
+#load libraries
+
+########################################
+## Load functions from other files
+########################################
+codePath <- file.path("***")
+source(file.path(codePath,"DataPrepFunctions.R"))
+source(file.path(codePath,"HelperFunctions.R"))
+
+########################################
+## Read Data From CSV File
+########################################
+inPath                  <- file.path("***")
+expData                 <- read.csv(file.path(inPath,"Expedia_Train_Subset.csv"),na.strings=c("NA"," "))
+destData                <- read.csv(file.path(inPath,"destinations.csv"),na.strings=c("NA"," "))
+
+#create a subset of the data that only contains booked stays
+DataCopy_booked         <- expData[expData$is_booking == TRUE,]
+# DataCopy_booked         <- DataCopy_booked[is.na(DataCopy_booked$srch_ci) == FALSE,]
+
+#look at the data before we do anything to it
+str(DataCopy_booked)
+
+# DataCopy_booked$mod_srch_ci <- DataCopy_booked$srch_ci
+# tmpIdx            <- is.na(DataCopy_booked$srch_ci)
+# DataCopy_booked[tmpIdx,"mod_srch_ci"] <- as.Date(DataCopy_booked[tmpIdx,"date_time"]) + 2
+
+
+DataCopy_booked                          <- prep_the_data(DataCopy_booked)
+DataCopy_booked$hotel_cluster            <- as.factor(DataCopy_booked$hotel_cluster)
+
+#look at the data after all the data maniuplation
+str(DataCopy_booked)
+
+########################################
+########PCA ################
+########################################
+
+DataCopy_PCA                     <- destData                                         #make a copy
+DataCopy_PCA$srch_destination_id <- as.character(DataCopy_PCA$srch_destination_id)  #convert
+rownames(DataCopy_PCA)           <- DataCopy_PCA$srch_destination_id                # preserve the destination IDs as row names
+
+# do the PCA
+data.pca <- prcomp(DataCopy_PCA[,2:150],
+                   center = TRUE,
+                   scale. = TRUE)
+
+
+# plot results and summarize
+plot(data.pca, type ="l")
+summary(data.pca)
+tail(data.pca)
+plot(data.pca$x[,1:3])
+
+
+d_pca <- as.data.frame(data.pca$x[,1:10])   # create a dataframe of the first 10 components
+str(d_pca)
+
+# add the destination IDs as a column
+library(data.table)
+library(plyr)
+setDT(d_pca, keep.rownames = TRUE)[]
+names(d_pca) <- sub('rn','srch_destination_id',names(d_pca))
+
+
+# merge the PC columns into the DataCopy_booked df for model use
+DataCopy_booked <- join(DataCopy_booked, d_pca, by='srch_destination_id', type='left', match='all')
+
+DataCopy_booked[is.na(DataCopy_booked$PC1) ==TRUE, ]$PC1 <- -9.319
+DataCopy_booked[is.na(DataCopy_booked$PC2) ==TRUE, ]$PC2 <- 0.8690
+DataCopy_booked[is.na(DataCopy_booked$PC3) ==TRUE, ]$PC3 <- 0.5024
+summary(DataCopy_booked)
+
+
+#Split the data for hold out and validation
+
+KeepFraction          <- 0.75   # specify the fraction of data to use in the hold-out test
+set.seed(123)
+
+#create the indexes
+trainIdx              <- sample(c(TRUE,FALSE),size=nrow(DataCopy_booked),replace=TRUE,prob=c(KeepFraction,1- KeepFraction))
+testIdx               <- !trainIdx
+DataCopy_booked_train <- DataCopy_booked[trainIdx,]
+DataCopy_booked_test  <- DataCopy_booked[testIdx,]
+
+# write.csv(row.names(DataCopy_booked_test), file="***/Desktop/testidx.csv")
+
+
+imp_columns <- c("bucket_hotel_market","bucket_srch_destination_id"
+                 ,"TRIM_mod_orig_dest_dist"
+                 ,"hotel_continent","bucket_hotel_country"
+                 , "is_package", "book_month", "package_site"
+                 , "mobile_site", "PC1", "includes_weekend_stay"
+                 , "mod_length_of_stay", "srch_children_cnt")
+
+trn_columns <- c("hotel_cluster", "bucket_hotel_market","bucket_srch_destination_id"
+                 ,"TRIM_mod_orig_dest_dist"
+                 ,"hotel_continent","bucket_hotel_country"
+                 , "is_package", "book_month", "package_site"
+                 , "mobile_site", "PC1", "includes_weekend_stay"
+                 , "mod_length_of_stay", "srch_children_cnt")
+
+
+############## XGBOOST ****************
+library("xgboost")
+
+#dMatrix_train <- xgb.DMatrix(data = data.matrix(subset(DataCopy_booked_train, select = -c(bin_length_of_stay,hotel_cluster) )),
+#                             label = DataCopy_booked_train$hotel_cluster)
+
+imp_columns <- c("bucket_hotel_market","bucket_srch_destination_id"
+                 ,"TRIM_mod_orig_dest_dist"
+                 ,"hotel_continent","bucket_hotel_country"
+                 , "is_package", "book_month", "package_site"
+                 , "mobile_site", "PC1"
+                 , "mod_length_of_stay", "PC2")
+
+label_numeric_train <- as.numeric(DataCopy_booked_train$hotel_cluster)-1
+
+dMatrix_train <- xgb.DMatrix(data = data.matrix(subset(DataCopy_booked_train, select =  imp_columns )),
+                            label = label_numeric_train)
+
+
+#dMatrix_test <- xgb.DMatrix(data = data.matrix(subset(DataCopy_booked_test, select = -c(bin_length_of_stay,hotel_cluster) )),
+ #                            label = DataCopy_booked_test$hotel_cluster)
+
+
+label_numeric_test <- as.numeric(DataCopy_booked_test$hotel_cluster)-1
+dMatrix_test <- xgb.DMatrix(data = data.matrix(subset(DataCopy_booked_test, select = imp_columns )),
+                             label = label_numeric_test)
+
+
+bst <- xgb.train(data=dMatrix_train,
+                 max.depth=20,
+                 eta=0.1,
+                 nthread = 4,
+                 nround=100,
+                 objective = "multi:softprob",
+                 num_class = 100,
+                 eval_metric = "map@5")
+
+
+importance_matrix <- xgb.importance(colnames(dMatrix_train), model = bst)
+print(importance_matrix)
+xgb.plot.importance(importance_matrix = importance_matrix)
+
+#Get the map5 for train
+pred_train  <- predict(bst, dMatrix_train)
+top5_train  <- AssignTop5ValuesFromProbabilities(pred_train, getinfo(dMatrix_train, 'nrow'))
+
+head(top5_train)
+
+maps_xgb_train <- numeric(nrow(DataCopy_booked_train))
+
+for (i in 1:nrow(data.frame(DataCopy_booked_train$hotel_cluster))){
+  maps_xgb_train[i] <- apk(5, data.frame(DataCopy_booked_train$hotel_cluster)[i,], as.list(top5_train[i,]))
+}
+
+# map@5 score for in-sample data
+
+mean(maps_xgb_train)
+
+head(top5_train)
+head(maps_xgb_train)
+head(DataCopy_booked_train$hotel_cluster)
+
+
+#Get the map5 for test
+pred_test  <- predict(bst, dMatrix_test)
+top5_test  <- AssignTop5ValuesFromProbabilities(pred_test, getinfo(dMatrix_test, 'nrow'))
+
+maps_xgb_test <- numeric(nrow(DataCopy_booked_test))
+
+for (i in 1:nrow(data.frame(DataCopy_booked_test$hotel_cluster))){
+  maps_xgb_test[i] <- apk(5, data.frame(DataCopy_booked_test$hotel_cluster)[i,], as.list(top5_test[i,]))
+}
+
+# map@5 score for test data
+mean(maps_xgb_test)
+head(maps_xgb_test,10)
+str(maps_xgb_test)
+str(maps_xgb_train)
+
+save(bst, file = file.path(codePath,"xgboost.RData"))
+
+head(top5_test)
+head(maps_xgb_test)
+head(DataCopy_booked_test$hotel_cluster)
+
+
+
+####  XGB ################
+
+
+
+DataCopy_booked_train <- DataCopy_booked[trainIdx,]
+DataCopy_booked_test  <- DataCopy_booked[testIdx,]
+str(DataCopy_booked_train)
+str(DataCopy_booked_test)
+
+#Full Data Copy
+label_numeric_train <- as.numeric(DataCopy_booked_train$hotel_cluster)-1
+dMatrix_train <- xgb.DMatrix(data = data.matrix(subset(DataCopy_booked_train, select = -c(hotel_cluster) )),
+                             label = label_numeric_train)
+#Full Data Copy test
+label_numeric_test <- as.numeric(DataCopy_booked_test$hotel_cluster)-1
+dMatrix_test <- xgb.DMatrix(data = data.matrix(subset(DataCopy_booked_test, select = -c(hotel_cluster) )),
+                            label = label_numeric_test)
+
+bst <- xgb.train(data=dMatrix_train,
+                 max.depth=15,
+                 nrounds=30,
+                 eta = .1,
+                 objective = "multi:softprob",
+                 num_class = 100)
+
+importance_matrix <- xgb.importance(colnames(dMatrix_train),model = bst)
+print(importance_matrix)
+xgb.plot.importance(importance_matrix = importance_matrix)
+
+#Get the map5 for train
+pred_train  <- predict(bst, dMatrix_train)
+top5_train  <- AssignTop5ValuesFromProbabilities(pred_train, getinfo(dMatrix_train, 'nrow'))
+
+head(top5_train)
+
+maps_xgb_train <- numeric(nrow(DataCopy_booked_train))
+
+for (i in 1:nrow(data.frame(DataCopy_booked_train$hotel_cluster))){
+  maps_xgb_train[i] <- apk(5, data.frame(DataCopy_booked_train$hotel_cluster)[i,], as.list(top5_train[i,]))
+}
+
+# map@5 score for in-sample data
+
+mean(maps_xgb_train)
+
+
+#Get the map5 for test
+pred_test  <- predict(bst, dMatrix_test)
+top5_test  <- AssignTop5ValuesFromProbabilities(pred_test, getinfo(dMatrix_test, 'nrow'))
+
+maps_xgb_test <- numeric(nrow(DataCopy_booked_test))
+
+for (i in 1:nrow(data.frame(DataCopy_booked_test$hotel_cluster))){
+  maps_xgb_test[i] <- apk(5, data.frame(DataCopy_booked_test$hotel_cluster)[i,], as.list(top5_test[i,]))
+}
+
+# map@5 score for test data
+mean(maps_xgb_test)
+
+
+
+######   XGB v3  ######
+
+imp_columns <- c("bucket_hotel_market", "mod_length_of_stay", "channel", 'stay_start_day_of_week'
+                 ,"TRIM_mod_orig_dest_dist"
+                 ,"hotel_continent","bucket_hotel_country"
+                 , "book_month", "package_site"
+                 , "mobile_site", "PC1"
+                 , "mod_length_of_stay", "PC2", "PC3", "mod_days_until_check_in"
+                , "srch_destination_id", "stay_end_day_of_week")
+
+
+#Full Data Copy
+label_numeric_train <- as.numeric(DataCopy_booked_train$hotel_cluster)-1
+
+dMatrix_train <- xgb.DMatrix(data = data.matrix(subset(DataCopy_booked_train, select =  imp_columns )),
+                             label = label_numeric_train)
+
+
+#dMatrix_test <- xgb.DMatrix(data = data.matrix(subset(DataCopy_booked_test, select = -c(bin_length_of_stay,hotel_cluster) )),
+#                            label = DataCopy_booked_test$hotel_cluster)
+
+
+label_numeric_test <- as.numeric(DataCopy_booked_test$hotel_cluster)-1
+dMatrix_test <- xgb.DMatrix(data = data.matrix(subset(DataCopy_booked_test, select = imp_columns )),
+                            label = label_numeric_test)
+
+bst <- xgb.train(data=dMatrix_train,
+                 max.depth=15,
+                 nrounds=30,
+                 eta = .1,
+                 objective = "multi:softprob",
+                 num_class = 100)
+
+importance_matrix <- xgb.importance(colnames(dMatrix_train),model = bst)
+print(importance_matrix)
+xgb.plot.importance(importance_matrix = importance_matrix)
+
+#Get the map5 for train
+pred_train  <- predict(bst, dMatrix_train)
+top5_train  <- AssignTop5ValuesFromProbabilities(pred_train, getinfo(dMatrix_train, 'nrow'))
+
+head(top5_train)
+
+maps_xgb_train <- numeric(nrow(DataCopy_booked_train))
+
+for (i in 1:nrow(data.frame(DataCopy_booked_train$hotel_cluster))){
+  maps_xgb_train[i] <- apk(5, data.frame(DataCopy_booked_train$hotel_cluster)[i,], as.list(top5_train[i,]))
+}
+
+# map@5 score for in-sample data
+
+mean(maps_xgb_train)
+
+
+#Get the map5 for test
+pred_test  <- predict(bst, dMatrix_test)
+top5_test  <- AssignTop5ValuesFromProbabilities(pred_test, getinfo(dMatrix_test, 'nrow'))
+
+maps_xgb_test <- numeric(nrow(DataCopy_booked_test))
+
+for (i in 1:nrow(data.frame(DataCopy_booked_test$hotel_cluster))){
+  maps_xgb_test[i] <- apk(5, data.frame(DataCopy_booked_test$hotel_cluster)[i,], as.list(top5_test[i,]))
+}
+
+# map@5 score for test data
+mean(maps_xgb_test)
+
+
+
+##############  XGB v4 #######################
+
+imp_columns <- c("bucket_hotel_market", "mod_length_of_stay", "channel", 'stay_start_day_of_week'
+                 ,"TRIM_mod_orig_dest_dist"
+                 ,"hotel_continent","bucket_hotel_country"
+                 , "book_month", "package_site"
+                 , "mobile_site", "PC1"
+                 , "mod_length_of_stay", "PC2", "PC3", "mod_days_until_check_in"
+                 , "srch_destination_id", "stay_end_day_of_week")
+
+
+#Full Data Copy
+label_numeric_train <- as.numeric(DataCopy_booked_train$hotel_cluster)-1
+
+dMatrix_train <- xgb.DMatrix(data = data.matrix(subset(DataCopy_booked_train, select =  imp_columns )),
+                             label = label_numeric_train)
+
+
+#dMatrix_test <- xgb.DMatrix(data = data.matrix(subset(DataCopy_booked_test, select = -c(bin_length_of_stay,hotel_cluster) )),
+#                            label = DataCopy_booked_test$hotel_cluster)
+
+
+label_numeric_test <- as.numeric(DataCopy_booked_test$hotel_cluster)-1
+dMatrix_test <- xgb.DMatrix(data = data.matrix(subset(DataCopy_booked_test, select = imp_columns )),
+                            label = label_numeric_test)
+
+bst <- xgb.train(data=dMatrix_train,
+                 max.depth=30,
+                 nrounds=200,
+                 eta = .1,
+                 objective = "multi:softprob",
+                 num_class = 100)
+
+importance_matrix <- xgb.importance(colnames(dMatrix_train),model = bst)
+#print(importance_matrix)
+xgb.plot.importance(importance_matrix = importance_matrix)
+
+#Get the map5 for train
+pred_train  <- predict(bst, dMatrix_train)
+top5_train  <- AssignTop5ValuesFromProbabilities(pred_train, getinfo(dMatrix_train, 'nrow'))
+
+head(top5_train)
+
+maps_xgb_train <- numeric(nrow(DataCopy_booked_train))
+
+for (i in 1:nrow(data.frame(DataCopy_booked_train$hotel_cluster))){
+  maps_xgb_train[i] <- apk(5, data.frame(DataCopy_booked_train$hotel_cluster)[i,], as.list(top5_train[i,]))
+}
+
+# map@5 score for in-sample data
+
+mean(maps_xgb_train)
+
+
+#Get the map5 for test
+pred_test  <- predict(bst, dMatrix_test)
+top5_test  <- AssignTop5ValuesFromProbabilities(pred_test, getinfo(dMatrix_test, 'nrow'))
+
+maps_xgb_test <- numeric(nrow(DataCopy_booked_test))
+
+for (i in 1:nrow(data.frame(DataCopy_booked_test$hotel_cluster))){
+  maps_xgb_test[i] <- apk(5, data.frame(DataCopy_booked_test$hotel_cluster)[i,], as.list(top5_test[i,]))
+}
+
+# map@5 score for test data
+mean(maps_xgb_test)
+
+DataCopy_booked_test$PCSign <- sign(DataCopy_booked_test$PC1)
+DataCopy_booked_train$PCSign <- sign(DataCopy_booked_train$PC1)
+
+
+##### XGB v5 #################
+
+
+imp_columns <- c("bucket_hotel_market", "mod_length_of_stay", "channel", 'stay_start_day_of_week'
+                 ,"TRIM_mod_orig_dest_dist"
+                 ,"hotel_continent","bucket_hotel_country"
+                 , "book_month", "package_site"
+                 , "mobile_site", "PC1"
+                 , "mod_length_of_stay", "PC2", "PC3", "mod_days_until_check_in"
+                 , "srch_destination_id", "stay_end_day_of_week", "PCSign")
+
+
+#Full Data Copy
+label_numeric_train <- as.numeric(DataCopy_booked_train$hotel_cluster)-1
+
+dMatrix_train <- xgb.DMatrix(data = data.matrix(subset(DataCopy_booked_train, select =  imp_columns )),
+                             label = label_numeric_train)
+
+
+#dMatrix_test <- xgb.DMatrix(data = data.matrix(subset(DataCopy_booked_test, select = -c(bin_length_of_stay,hotel_cluster) )),
+#                            label = DataCopy_booked_test$hotel_cluster)
+
+
+label_numeric_test <- as.numeric(DataCopy_booked_test$hotel_cluster)-1
+dMatrix_test <- xgb.DMatrix(data = data.matrix(subset(DataCopy_booked_test, select = imp_columns )),
+                            label = label_numeric_test)
+
+bst <- xgb.train(data=dMatrix_train,
+                 max.depth=30,
+                 nrounds=200,
+                 eta = .1,
+                 objective = "multi:softprob",
+                 num_class = 100)
+
+importance_matrix <- xgb.importance(colnames(dMatrix_train),model = bst)
+#print(importance_matrix)
+xgb.plot.importance(importance_matrix = importance_matrix)
+
+#Get the map5 for train
+pred_train  <- predict(bst, dMatrix_train)
+top5_train  <- AssignTop5ValuesFromProbabilities(pred_train, getinfo(dMatrix_train, 'nrow'))
+
+head(top5_train)
+
+maps_xgb_train <- numeric(nrow(DataCopy_booked_train))
+
+for (i in 1:nrow(data.frame(DataCopy_booked_train$hotel_cluster))){
+  maps_xgb_train[i] <- apk(5, data.frame(DataCopy_booked_train$hotel_cluster)[i,], as.list(top5_train[i,]))
+}
+
+# map@5 score for in-sample data
+
+mean(maps_xgb_train)
+
+
+#Get the map5 for test
+pred_test  <- predict(bst, dMatrix_test)
+top5_test  <- AssignTop5ValuesFromProbabilities(pred_test, getinfo(dMatrix_test, 'nrow'))
+
+maps_xgb_test <- numeric(nrow(DataCopy_booked_test))
+
+for (i in 1:nrow(data.frame(DataCopy_booked_test$hotel_cluster))){
+  maps_xgb_test[i] <- apk(5, data.frame(DataCopy_booked_test$hotel_cluster)[i,], as.list(top5_test[i,]))
+}
+
+# map@5 score for test data
+mean(maps_xgb_test)
+
+##### XGB v6 #################
+
+
+imp_columns <- c("bucket_hotel_market", "mod_length_of_stay", "channel", 'stay_start_day_of_week'
+                 ,"TRIM_mod_orig_dest_dist"
+                 ,"hotel_continent","bucket_hotel_country"
+                 , "book_month", "package_site"
+                 , "mobile_site", "PC1"
+                 , "mod_length_of_stay", "PC2", "PC3", "mod_days_until_check_in"
+                 , "srch_destination_id", "stay_end_day_of_week", "PCSign")
+
+
+#Full Data Copy
+label_numeric_train <- as.numeric(DataCopy_booked_train$hotel_cluster)-1
+
+dMatrix_train <- xgb.DMatrix(data = data.matrix(subset(DataCopy_booked_train, select =  -c(hotel_cluster, date_time, mod_srch_ci, mod_srch_co) )),
+                             label = label_numeric_train)
+
+
+#dMatrix_test <- xgb.DMatrix(data = data.matrix(subset(DataCopy_booked_test, select = -c(bin_length_of_stay,hotel_cluster) )),
+#                            label = DataCopy_booked_test$hotel_cluster)
+
+
+label_numeric_test <- as.numeric(DataCopy_booked_test$hotel_cluster)-1
+dMatrix_test <- xgb.DMatrix(data = data.matrix(subset(DataCopy_booked_test, select = -c(hotel_cluster, date_time, mod_srch_ci, mod_srch_co) )),
+                            label = label_numeric_test)
+
+bst <- xgb.train(data=dMatrix_train,
+                 max.depth=17,
+                 nrounds=50,
+                 eta = .1,
+                 eval_metric = 'map@5',
+                 colsample_bytree =  0.7, 
+                 objective = "multi:softprob",
+                 num_class = 100)
+
+importance_matrix <- xgb.importance(colnames(dMatrix_train),model = bst)
+#print(importance_matrix)
+xgb.plot.importance(importance_matrix = head(importance_matrix,10))
+
+#Get the map5 for train
+pred_train  <- predict(bst, dMatrix_train)
+top5_train  <- AssignTop5ValuesFromProbabilities(pred_train, getinfo(dMatrix_train, 'nrow'))
+
+head(top5_train)
+
+maps_xgb_train <- numeric(nrow(DataCopy_booked_train))
+
+for (i in 1:nrow(data.frame(DataCopy_booked_train$hotel_cluster))){
+  maps_xgb_train[i] <- apk(5, data.frame(DataCopy_booked_train$hotel_cluster)[i,], as.list(top5_train[i,]))
+}
+
+# map@5 score for in-sample data
+
+mean(maps_xgb_train)
+
+
+#Get the map5 for test
+pred_test  <- predict(bst, dMatrix_test)
+top5_test  <- AssignTop5ValuesFromProbabilities(pred_test, getinfo(dMatrix_test, 'nrow'))
+
+maps_xgb_test <- numeric(nrow(DataCopy_booked_test))
+
+for (i in 1:nrow(data.frame(DataCopy_booked_test$hotel_cluster))){
+  maps_xgb_test[i] <- apk(5, data.frame(DataCopy_booked_test$hotel_cluster)[i,], as.list(top5_test[i,]))
+}
+
+# map@5 score for test data
+mean(maps_xgb_test)
+
+
+mean(maps_xgb_test > 0)
+
+
+#################### USE CARET TO TUNE XGB PARAMETERS ############################
+
+library(caret)
+library(xgboost)
+library(readr)
+library(dplyr)
+library(tidyr)
+
+xgb_grid_1 <- expand.grid(
+  nrounds= c(seq(from=50, to=950,by=100)),
+  max_depth = c(seq(from=17, to=26, by=3)),
+  colsample_bytree = c(0.4, 0.7, 1.0), 
+  eta = 0.1,
+  gamma = 0, 
+  min_child_weight = 0.5
+  , subsample = 1
+)
+
+xgb_trcontrol <- trainControl(
+  method="cv",
+  number = 5,
+  verboseIter = TRUE,
+  returnData=FALSE,
+  returnResamp = "all",
+  allowParallel = TRUE
+)
+
+xgb_train_1 <- train(
+  y =as.numeric(DataCopy_booked_test$hotel_cluster)-1,
+  x = data.matrix(subset(DataCopy_booked_test, select = imp_columns )),
+  trControl = xgb_trcontrol,
+  objective = "multi:softprob",
+  eval_metric = 'map@5', 
+  tuneGrid = xgb_grid_1,
+  num_class = 100,
+  method="xgbTree"
+)
+
+
+warnings()
+
+summary(xgb_train_1)
