@@ -1,0 +1,86 @@
+#################################################
+## PREDICT 498
+## Capstone Project - Kaggle Expedia Competition
+## File that preps a data set for the model
+## Collaborative Coding from Brad Lohmeyer, Chanah Stern, Dae Yoon, and Rachel Levy
+#################################################
+#################################################################
+## File with helper functions for scoring, assigning values etc.
+#################################################################
+
+#load libraries
+library(Metrics)
+
+# This function helps to establish baseline map5 score by assigning a set of top 5 values to a data frame
+# In 'real cases', you'll want to use the AssignTopFiveValuesFromProbabilities function which will assign top 5 based on prediction probabilities
+AssignTopFiveValuesHardCoded <- function(xData, top_five_values, new_column_name)
+{
+  temp_df                    <- data.frame(top_five_values)          # Turns the top five values into a data frame
+  colnames(temp_df)          <- new_column_name                      # Assign the colname to the new column
+  temp_df$new_column_name    <- rep(temp_df$preds, nrow(xData))      # Copy the top 5 down all rows for the length of the data frame
+
+  xData <- cbind( xData, temp_df)                                    # Combine the new column with the existing data frame
+  return(xData)
+}
+
+##*****************************************************************
+##*****************************************************************
+## WARNING WARNING WARNING WARNING WARNING WARNING WARNING WARNING
+##*****************************************************************
+##*****************************************************************
+## This function has not been teste yet: Consider it a placeholder
+##*****************************************************************
+
+# This function finds the top 5 hotel clusters for a set of prediction probabilities for a given # of levels
+AssignTopNValuesFromProbabilities <-  function(preds, length,N) {
+    preds                     <- t(matrix(preds, ncol = length))
+    return(t(apply(preds, 1, order, decreasing = T))[, 1:N] - 1)
+}
+
+
+# Pass-through for AssignTopNValuesFromProbabilities function: hard coded for top 5
+# See AssignTopNValuesFromProbabilities comments for more information
+AssignTop5ValuesFromProbabilities <- function(preds, length)
+{
+  return(AssignTopNValuesFromProbabilities(preds,length,5))
+}
+
+#Don't use anymore
+mapk_orig <- function (k, actual, predicted)
+{
+    scores <- rep(0, nrow(predicted))                                       # Create a vector to capture the score at each row
+    for (i in 1:length(scores))                                             # For each row...
+     {
+      list_actual <- list(actual[i,])                                       # Turn the actuals into a list of k so that we can compare to the k predictions
+      list_actual <- rep(list_actual[[1]],k)
+      list_actual <- t(matrix(list_actual))                                 # Turn the actuals in a transposed matrix for easier comparison below
+      list_pred   <- list(strsplit(as.character(predicted[i,1])," "))[[1]]  # Turn the predictions into a split list of k predictions
+      list_pred   <- matrix(unlist(list_pred), ncol=k, byrow=1)             # Turn the predictions into a transposed matrix with k rows and 1 column, for easier comparison below
+      succ        <- (list_actual == list_pred)                             # Compare each actual to the predictions
+      multiple    <- 1 / (1:k)                                              # Create a vector of k length that will provide a multiple for scoring success in each position
+      scores[i]   <- (succ %*% multiple)                                    # Find an actual success score
+    }
+    return(mean(scores))                                                    # Return the mean of the scores
+}
+
+# This function finds the MAP (Mean Average Precision) score for k
+# The function assumes that both inputs are data frames.
+# Pass in a dMatrix for 'actual'
+# Pass in a data.frame that contains one column where every row contains k predictions in descending order of likelihood for 'predicted'
+mapk <- function (k, actual, predicted)
+{
+  labels <- as.list(getinfo(actual,"label"))
+  num.class <- 100
+  pred <- matrix(predicted, nrow = num.class)
+  top <- t(apply(pred, 2, function(y) order(y)[num.class:(num.class-4)]-1))
+  top <- split(top, 1:NROW(top))
+
+  return(Metrics::mapk(5, labels, top))
+}
+
+# Pass-through for mapk function: hard coded for map5
+# See mapk comments for more information
+map5 <- function(actual, predicted)
+{
+  return(mapk(5, actual, predicted))
+}
